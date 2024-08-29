@@ -1,0 +1,186 @@
+import cv2
+import os
+import numpy as np
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+from datetime import datetime
+
+# Load pre-trained face detection model
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+def create_label_dict():
+    label_dict = {}
+    current_label = 0
+    for file_name in os.listdir('Faces'):
+        if file_name.endswith('.jpg'):
+            name = file_name.split('_')[0]
+            if name not in label_dict:
+                label_dict[name] = current_label
+                current_label += 1
+    return label_dict
+
+def train_model(label):
+    faces = []
+    labels = []
+    for file_name in os.listdir('Faces'):
+        if file_name.endswith('.jpg'):
+            name = file_name.split('_')[0]
+            image = cv2.imread(os.path.join('Faces', file_name))
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            detected_faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            if len(detected_faces) > 0:
+                face_crop = gray[detected_faces[0][1]:detected_faces[0][1] + detected_faces[0][3],
+                                 detected_faces[0][0]:detected_faces[0][0] + detected_faces[0][2]]
+                faces.append(face_crop)
+                labels.append(label[name])
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    recognizer.train(faces, np.array(labels))
+    recognizer.save('trained_model.xml')
+    return recognizer
+
+label = create_label_dict()
+Recognizer = train_model(label)
+label_reverse = {v: k for k, v in label.items()}
+
+# Capture video from webcam (index 0)
+mainVideo = cv2.VideoCapture(0)
+
+# Check if video capture was successful
+if not mainVideo.isOpened():
+    print("Error: Unable to open video capture.")
+    exit()
+
+# Initialize variables for motion detection
+staticBack = None
+motionList = [None, None]
+captureCount = 0  # Counter for captured motion frames
+
+# Create directories if they don't exist
+if not os.path.exists('Captured_Motion_Frames'):
+    os.makedirs('Captured_Motion_Frames')
+if not os.path.exists('Faces'):
+    os.makedirs('Faces')
+if not os.path.exists('recognized'):
+    os.makedirs('recognized')
+
+# Loop to capture frames and detect motion
+while True:
+    ret, frame = mainVideo.read()
+    if not ret:
+        print("Error: Failed to capture frame.")
+        break
+
+    motion = 0
+    grayFrame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    grayFrame = cv2.GaussianBlur(grayFrame, (21, 21), 0)
+
+    if staticBack is None:
+        staticBack = grayFrame
+        continue
+
+    diffFrame = cv2.absdiff(staticBack, grayFrame)
+    threshFrame = cv2.threshold(diffFrame, 30, 255, cv2.THRESH_BINARY)[1]
+    threshFrame = cv2.dilate(threshFrame, None, iterations=2)
+
+    contours, _ = cv2.findContours(threshFrame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        if cv2.contourArea(contour) < 10000:
+            continue
+        motion = 1
+
+    motionList.append(motion)
+    motionList = motionList[-2:]
+
+    if motionList[-1] == 1 and motionList[-2] == 0:
+        captureCount += 1
+        motionFramePath = os.path.join('Captured_Motion_Frames', f'motion_frame_{captureCount}.jpg')
+        cv2.imwrite(motionFramePath, frame)
+        break  # Exit loop after capturing motion frame
+
+    cv2.imshow("Motion Detection", frame)
+    key = cv2.waitKey(1)
+    if key == ord('q'):
+        break
+
+mainVideo.release()
+cv2.destroyAllWindows()
+
+# Load the captured motion frame
+frame = cv2.imread(motionFramePath)
+
+# Perform face detection and recognition
+gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+# Initialize label_id
+label_id = None
+
+if len(faces) > 0:
+    for (x, y, w, h) in faces:
+        face_crop = gray[y:y + h, x:x + w]
+        label_id, confidence = Recognizer.predict(face_crop)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        label_text = f"{label_reverse[label_id]} ({confidence:.2f})"
+        cv2.putText(frame, label_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    print("Face detected and recognized as:", label_reverse[label_id])
+else:
+    print("No face detected in the image.")
+
+# Save the frame with recognized faces
+recognized_frame_path = os.path.join('recognized', 'recognized_face.jpg')
+cv2.imwrite(recognized_frame_path, frame)
+
+# Send email with the captured image and recognition result
+subject = "Alert: Motion Detected and Face Recognized"
+if label_id is not None:
+    body = f"Motion detected and face recognized as: {label_reverse[label_id]}"
+else:
+    body = "Motion detected but no face recognized."
+
+attachment_path = recognized_frame_path
+
+def send_email(subject, body, attachment_path):
+    sender_email = 'abc@gmail.com'
+    sender_password = '***'
+    receiver_email = 'xyz@gmail.com'
+
+    # Create message container
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = subject
+
+    # Attach body text
+    msg.attach(MIMEText(body, 'plain'))
+
+    # Attach file
+    attachment = open(attachment_path, "rb")
+    part = MIMEBase('application', 'octet-stream')
+    part.set_payload((attachment).read())
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', "attachment; filename= " + attachment_path.split('/')[-1])
+    msg.attach(part)
+
+    # Connect to SMTP server and send email
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email,'rqop cthw egjx mkrg')
+        text = msg.as_string()
+        server.sendmail(sender_email, receiver_email, text)
+        server.quit()
+        print("Email sent successfully")
+    except Exception as e:
+        print(f"Error sending email: {e}")
+
+send_email(subject, body, attachment_path)
+
+# Display the frame with recognized faces
+cv2.imshow("Face Recognition", frame)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+
+print("Recognized face image saved and email sent successfully.")
