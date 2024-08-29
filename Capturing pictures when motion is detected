@@ -1,0 +1,99 @@
+import cv2
+import pandas as pd
+from datetime import datetime
+
+# Initialize variables for motion detection
+staticBack = None
+motionList = [None, None]
+motionTimes = []
+
+# Initialize variables for image capture on motion
+cap = cv2.VideoCapture(0)  # Webcam capture
+fourcc = cv2.VideoWriter_fourcc(*'XVID')
+out = cv2.VideoWriter('output.avi', fourcc, 20.0, (640, 480))
+
+
+def capture_image(frame):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"motion_{timestamp}.jpg"
+    cv2.imwrite(filename, frame)
+    print(f"Motion detected! Image captured: {filename}")
+
+
+# Check if video capture was successful
+if not cap.isOpened():
+    print("Error: Unable to open video capture.")
+    exit()
+
+# Loop to capture frames and detect motion
+while True:
+    # Read frame from video
+    ret, frame = cap.read()
+
+    if not ret:
+        print("Error: Failed to capture frame.")
+        break
+
+    # Convert frame to grayscale and blur it
+    grayFrame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    grayFrame = cv2.GaussianBlur(grayFrame, (21, 21), 0)
+
+    # Initialize static background frame in the first iteration
+    if staticBack is None:
+        staticBack = grayFrame
+        continue
+
+    # Calculate absolute difference between static background and current frame
+    diffFrame = cv2.absdiff(staticBack, grayFrame)
+    threshFrame = cv2.threshold(diffFrame, 30, 255, cv2.THRESH_BINARY)[1]
+    threshFrame = cv2.dilate(threshFrame, None, iterations=2)
+
+    # Find contours of moving objects
+    contours, _ = cv2.findContours(threshFrame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    motion = 0
+    for contour in contours:
+        if cv2.contourArea(contour) < 10000:
+            continue
+        motion = 1
+        (x, y, w, h) = cv2.boundingRect(contour)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
+
+        # Capture image when motion detected
+        capture_image(frame)
+
+    # Append motion status to motionList
+    motionList.append(motion)
+    motionList = motionList[-2:]
+
+    # Append motion start and end times to motionTimes
+    if motionList[-1] == 1 and motionList[-2] == 0:
+        motionTimes.append({"Initial": datetime.now(), "Final": None})
+    elif motionList[-1] == 0 and motionList[-2] == 1:
+        motionTimes[-1]["Final"] = datetime.now()
+
+    # Display frames for debugging
+    cv2.imshow("Color Frame", frame)
+    cv2.imshow("Difference Frame", diffFrame)
+    cv2.imshow("Threshold Frame", threshFrame)
+
+    # Write the frame to the output video file
+    out.write(frame)
+
+    # Wait for 'q' key to stop motion detection
+    key = cv2.waitKey(1)
+    if key == ord('q'):
+        if motion == 1:
+            motionTimes.append({"Initial": datetime.now(), "Final": datetime.now()})
+        break
+
+# Create DataFrame from motionTimes list of dictionaries
+df = pd.DataFrame(motionTimes)
+
+# Save motion times to CSV file
+df.to_csv("MovementsTimeFile.csv", index=False)
+
+# Release video capture, video writer, and close all OpenCV windows
+cap.release()
+out.release()
+cv2.destroyAllWindows()
